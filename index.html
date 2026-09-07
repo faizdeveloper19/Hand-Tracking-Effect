@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hand Frame Style</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #111;
+      height: 100vh;
+      width: 100vw;
+      font-family: system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    #stage {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #webcam {
+      display: none;
+    }
+
+    #output {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+
+    #hud {
+      position: absolute;
+      bottom: 24px;
+      left: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: #fff;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+      font-size: 14px;
+      pointer-events: none;
+    }
+
+    #styleLabel {
+      font-weight: 600;
+      font-size: 16px;
+    }
+
+    #hint {
+      opacity: 0.7;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="output"></canvas>
+    <div id="hud">
+      <span id="styleLabel">Style: None</span>
+      <span id="hint">Form a rectangle with both hands' thumb+index. Pinch and release to change style.</span>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+
+  <script>
+    const videoEl = document.getElementById('webcam');
+    const canvasEl = document.getElementById('output');
+    const ctx = canvasEl.getContext('2d');
+    const styleLabelEl = document.getElementById('styleLabel');
+
+    const STYLES = [
+      { name: 'Anime', apply: applyAnime },
+      { name: 'Sketch', apply: applySketch },
+      { name: 'Ghibli', apply: applyGhibli },
+      { name: 'Red', apply: applyRed },
+      { name: 'Pixelate', apply: applyPixelate },
+      { name: 'Black & White', apply: applyBlackWhite },
+      { name: 'ASCII Matrix', apply: applyAsciiMatrix },
+      { name: 'Low Poly Origami', apply: applyLowPoly },
+      { name: 'Halftone Pop Art', apply: applyHalftone }
+    ];
+
+    let styleIndex = 0;
+
+    // per-hand pinch state, keyed by handedness label ('Left' | 'Right')
+    const pinchState = { Left: false, Right: false };
+    const PINCH_THRESHOLD = 0.06;
+
+    function dist(a, b) {
+      const dx = a.x - b.x, dy = a.y - b.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function onResults(results) {
+      const w = canvasEl.width = window.innerWidth;
+      const h = canvasEl.height = window.innerHeight;
+      const vw = results.image.width;
+      const vh = results.image.height;
+
+      // "cover" fit
+      const scale = Math.max(w / vw, h / vh);
+      const drawW = vw * scale;
+      const drawH = vh * scale;
+      const offX = (w - drawW) / 2;
+      const offY = (h - drawH) / 2;
+
+      ctx.save();
+      ctx.clearRect(0, 0, w, h);
+
+      // mirror draw base frame
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(results.image, w - offX - drawW, offY, drawW, drawH);
+      ctx.restore();
+
+      const toScreen = (nx, ny) => ({
+        x: w - (offX + nx * drawW),
+        y: offY + ny * drawH,
+      });
+
+      const hands = results.multiHandLandmarks || [];
+      const handedness = results.multiHandedness || [];
+      const points = {}; 
+
+      hands.forEach((landmarks, i) => {
+        const label = handedness[i]?.label;
+        if (!label) return;
+
+        const thumbTip = landmarks[4];
+        const indexTip = landmarks[8];
+        points[label] = { thumb: thumbTip, index: indexTip };
+
+        const pinching = dist(thumbTip, indexTip) < PINCH_THRESHOLD;
+        if (pinchState[label] && !pinching) {
+          styleIndex = (styleIndex + 1) % STYLES.length;
+          styleLabelEl.textContent = `Style: ${STYLES[styleIndex].name}`;
+        }
+        pinchState[label] = pinching;
+      });
+
+      if (points.Left && points.Right) {
+        const quad = [
+          toScreen(points.Left.thumb.x, points.Left.thumb.y),
+          toScreen(points.Left.index.x, points.Left.index.y),
+          toScreen(points.Right.index.x, points.Right.index.y),
+          toScreen(points.Right.thumb.x, points.Right.thumb.y),
+        ];
+
+        const xs = quad.map(p => p.x);
+        const ys = quad.map(p => p.y);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs);
+        const y0 = Math.min(...ys), y1 = Math.max(...ys);
+        const boxW = x1 - x0, boxH = y1 - y0;
+
+        if (boxW > 10 && boxH > 10) {
+          const styleFn = STYLES[styleIndex].apply;
+          if (styleFn) {
+            const region = ctx.getImageData(x0, y0, boxW, boxH);
+            styleFn(region);
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(quad[0].x, quad[0].y);
+            for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y);
+            ctx.closePath();
+            ctx.clip();
+
+            const off = document.createElement('canvas');
+            off.width = boxW;
+            off.height = boxH;
+            off.getContext('2d').putImageData(region, 0, 0);
+            ctx.drawImage(off, x0, y0);
+            ctx.restore();
+          }
+
+          ctx.save();
+          // Solid black boundary
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(quad[0].x, quad[0].y);
+          for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y);
+          ctx.closePath();
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    // --- Original Filters ---
+
+    function applyAnime(imageData) {
+      const d = imageData.data;
+      const levels = 4;
+      const step = 255 / (levels - 1);
+      for (let i = 0; i < d.length; i += 4) {
+        d[i] = Math.round(d[i] / step) * step;
+        d[i + 1] = Math.round(d[i + 1] / step) * step;
+        d[i + 2] = Math.round(d[i + 2] / step) * step;
+        const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        d[i] = clamp(avg + (d[i] - avg) * 1.6);
+        d[i + 1] = clamp(avg + (d[i + 1] - avg) * 1.6);
+        d[i + 2] = clamp(avg + (d[i + 2] - avg) * 1.6);
+      }
+    }
+
+    function applySketch(imageData) {
+      const { data, width, height } = imageData;
+      const gray = new Float32Array(width * height);
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        gray[p] = 0.3 * data[i] + 0.59 * data[i + 1] + 0.11 * data[i + 2];
+      }
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const p = y * width + x;
+          const gx = gray[p - 1] - gray[p + 1];
+          const gy = gray[p - width] - gray[p + width];
+          const edge = Math.sqrt(gx * gx + gy * gy);
+          const v = clamp(255 - edge * 2);
+          const idx = p * 4;
+          data[idx] = data[idx + 1] = data[idx + 2] = v;
+        }
+      }
+    }
+
+    function applyGhibli(imageData) {
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        d[i] = clamp(r * 1.08 + 15);
+        d[i + 1] = clamp(g * 1.05 + 10);
+        d[i + 2] = clamp(b * 0.9);
+        const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        d[i] = clamp(d[i] + (avg - d[i]) * 0.15);
+        d[i + 1] = clamp(d[i + 1] + (avg - d[i + 1]) * 0.15);
+        d[i + 2] = clamp(d[i + 2] + (avg - d[i + 2]) * 0.15);
+      }
+    }
+
+    function applyRed(imageData) {
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+        d[i] = clamp(gray * 1.4 + 40);
+        d[i + 1] = clamp(gray * 0.15);
+        d[i + 2] = clamp(gray * 0.15);
+      }
+    }
+
+    function applyPixelate(imageData) {
+      const { data, width, height } = imageData;
+      const block = 14;
+      for (let by = 0; by < height; by += block) {
+        for (let bx = 0; bx < width; bx += block) {
+          let r = 0, g = 0, b = 0, count = 0;
+          for (let y = by; y < Math.min(by + block, height); y++) {
+            for (let x = bx; x < Math.min(bx + block, width); x++) {
+              const idx = (y * width + x) * 4;
+              r += data[idx]; g += data[idx + 1]; b += data[idx + 2];
+              count++;
+            }
+          }
+          r = Math.round(r / count);
+          g = Math.round(g / count);
+          b = Math.round(b / count);
+          for (let y = by; y < Math.min(by + block, height); y++) {
+            for (let x = bx; x < Math.min(bx + block, width); x++) {
+              const idx = (y * width + x) * 4;
+              data[idx] = r; data[idx + 1] = g; data[idx + 2] = b;
+            }
+          }
+        }
+      }
+    }
+
+    function applyBlackWhite(imageData) {
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = clamp((0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2] - 128) * 1.2 + 128);
+        d[i] = d[i + 1] = d[i + 2] = gray;
+      }
+    }
+
+    // --- NEW UNIQUE FILTERS ---
+
+    // 1. Slit Scan Smear Effect
+    let scanBufferCanvas = document.createElement('canvas');
+    let scanBufferCtx = scanBufferCanvas.getContext('2d');
+    let scanY = 0;
+    let lastBoxW = 0, lastBoxH = 0;
+
+    
+
+    // 2. ASCII Matrix
+    function applyAsciiMatrix(imageData) {
+      const { data, width, height } = imageData;
+      const chars = ["@", "%", "#", "*", "+", "=", "-", ":", ".", " "];
+      const charLen = chars.length - 1;
+      const blockSize = 8; // Size of text grid
+
+      const off = document.createElement('canvas');
+      off.width = width; off.height = height;
+      const octx = off.getContext('2d');
+      
+      octx.fillStyle = '#000';
+      octx.fillRect(0, 0, width, height);
+      octx.fillStyle = '#0f0'; // Matrix green
+      octx.font = '8px monospace';
+      octx.textAlign = 'center';
+      octx.textBaseline = 'middle';
+
+      for (let y = 0; y < height; y += blockSize) {
+        for (let x = 0; x < width; x += blockSize) {
+          let r = 0, g = 0, b = 0, count = 0;
+          for (let by = 0; by < blockSize && y + by < height; by++) {
+            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+              const idx = ((y + by) * width + (x + bx)) * 4;
+              r += data[idx]; g += data[idx + 1]; b += data[idx + 2];
+              count++;
+            }
+          }
+          const avg = (r + g + b) / (3 * count);
+          const charIdx = Math.floor((1 - avg / 255) * charLen);
+          octx.fillText(chars[charIdx], x + blockSize / 2, y + blockSize / 2);
+        }
+      }
+      
+      const outData = octx.getImageData(0, 0, width, height).data;
+      for (let i = 0; i < data.length; i++) data[i] = outData[i];
+    }
+
+    // 3. Low Poly Origami
+    function applyLowPoly(imageData) {
+      const { data, width, height } = imageData;
+      const off = document.createElement('canvas');
+      off.width = width; off.height = height;
+      const octx = off.getContext('2d');
+      const step = 20; // Polygon size
+
+      const getColor = (x, y) => {
+        const px = Math.min(Math.max(Math.floor(x), 0), width - 1);
+        const py = Math.min(Math.max(Math.floor(y), 0), height - 1);
+        const idx = (py * width + px) * 4;
+        return `rgb(${data[idx]},${data[idx+1]},${data[idx+2]})`;
+      };
+
+      for (let y = -step; y < height + step; y += step) {
+        for (let x = -step; x < width + step; x += step) {
+          // Create staggered points for triangles
+          const px = x + (y % (step * 2) === 0 ? 0 : step / 2);
+          const p1 = { x: px, y };
+          const p2 = { x: px + step, y };
+          const p3 = { x: px + step / 2, y  };
+          const p4 = { x: px - step / 2, y  };
+
+          // Up-pointing triangle
+          octx.fillStyle = getColor((p1.x + p2.x + p3.x) / 3, (p1.y + p2.y + p3.y) / 3);
+          octx.strokeStyle = octx.fillStyle; // Hide seams
+          octx.lineWidth = 1;
+          octx.beginPath(); octx.moveTo(p1.x, p1.y); octx.lineTo(p2.x, p2.y); octx.lineTo(p3.x, p3.y); 
+          octx.fill(); octx.stroke();
+
+          // Down-pointing triangle
+          octx.fillStyle = getColor((p1.x + p3.x + p4.x) / 3, (p1.y + p3.y + p4.y) / 3);
+          octx.strokeStyle = octx.fillStyle;
+          octx.lineWidth = 1;
+          octx.beginPath(); octx.moveTo(p1.x, p1.y); octx.lineTo(p3.x, p3.y); octx.lineTo(p4.x, p4.y); 
+          octx.fill(); octx.stroke();
+        }
+      }
+      const outData = octx.getImageData(0, 0, width, height).data;
+      for (let i = 0; i < data.length; i++) data[i] = outData[i];
+    }
+
+    // 4. Halftone Pop Art Print
+    function applyHalftone(imageData) {
+      const { data, width, height } = imageData;
+      const blockSize = 6;
+      
+      const off = document.createElement('canvas');
+      off.width = width; off.height = height;
+      const octx = off.getContext('2d');
+      
+      // Vintage newsprint yellow background
+      octx.fillStyle = '#f4eadd';
+      octx.fillRect(0, 0, width, height);
+      octx.fillStyle = '#111';
+
+      for (let y = 0; y < height; y += blockSize) {
+        for (let x = 0; x < width; x += blockSize) {
+          let sum = 0, count = 0;
+          for (let by = 0; by < blockSize && y + by < height; by++) {
+            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+              const idx = ((y + by) * width + (x + bx)) * 4;
+              // Grayscale luminance
+              sum += 0.3 * data[idx] + 0.59 * data[idx + 1] + 0.11 * data[idx + 2];
+              count++;
+            }
+          }
+          const avg = sum / count;
+          // Darker areas get larger ink dots
+          const radius = (1 - avg / 255) * (blockSize / 2) * 1.2;
+          
+          if (radius > 0.5) {
+            octx.beginPath();
+            octx.arc(x + blockSize / 2, y + blockSize / 2, radius, 0, Math.PI * 2);
+            octx.fill();
+          }
+        }
+      }
+      const outData = octx.getImageData(0, 0, width, height).data;
+      for (let i = 0; i < data.length; i++) data[i] = outData[i];
+    }
+
+    function clamp(v) {
+      return v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+
+    // --- MediaPipe setup ---
+
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6,
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoEl, {
+      onFrame: async () => {
+        await hands.send({ image: videoEl });
+      },
+      width: 1280,
+      height: 720,
+    });
+
+    camera.start();
+  </script>
+</body>
+</html>
